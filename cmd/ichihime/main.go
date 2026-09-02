@@ -1,12 +1,24 @@
 package main
 
 import (
-	"fmt"
+	"log"
+	"os"
+
+	ichihime_http "github.com/gammbol/ichihime/internal/http"
+
+	"github.com/joho/godotenv"
 )
 
-func main() {
-	fmt.Println("hello world")
+var client ichihime_http.IchihimeCfg
 
-	var co connConf
-	co.Init()
+func main() {
+	dotenvErr := godotenv.Load()
+	if dotenvErr != nil {
+		log.Fatal("Error loading .env file")
+	}
+
+	client.Init(os.Getenv("DATABASE_URL"), os.Getenv("API_URL"))
+	// client.AddRoute("/albums", ichihime_http.TypeGet, GetAlbums)
+	client.Run()
 }
+

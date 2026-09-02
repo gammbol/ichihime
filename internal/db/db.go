@@ -5,36 +5,56 @@ import (
 	"errors"
 	"fmt"
 
+	"github.com/gammbol/ichihime/internal/storage"
 	"github.com/jackc/pgx/v5"
 )
 
-type connConf struct {
+type ConnConf struct {
 	connString 		string
 	isConnected		bool
 
-	conn *pgx.Conn
+	Conn *pgx.Conn
 }
 
-func (c connConf) Init() error {
-	var err error
+func (c *ConnConf) Init(cs string) {
+	c.connString = cs
+}
 
-	c.conn, err = pgx.Connect(context.Background(), c.connString)
+func (c *ConnConf) GetAllAlbums() ([]storage.Album, error) {
+	defer c.Close()
+	err := c.Open()
+	if err != nil {
+		return nil, fmt.Errorf("GetAllAlbums: %v", err)
+	}
+
+	rows, err := c.Conn.Query(context.Background(), "select * from album")
+	if err != nil {
+		return nil, fmt.Errorf("GetAllAlbums: %v", err)
+	}
+
+	albums, err := pgx.CollectRows(rows, pgx.RowToStructByName[storage.Album])
+	if err != nil {
+		return nil, fmt.Errorf("GetAllAlbums: %v", err)
+	}
+
+	return albums, nil
+}
+
+func (c *ConnConf) Open() error {
+	var err error
+	c.Conn, err = pgx.Connect(context.Background(), c.connString)
 	if err != nil {
 		return fmt.Errorf("Error connecting to the database: %s", err)
 	}
 
-	pingErr := c.conn.Ping(context.Background())
-	if pingErr != nil {
-		c.conn.Close(context.Background())
-		return fmt.Errorf("Error establishing the connection with the database: %s", err)
-	}
-
+	c.isConnected = true
 	return nil
 }
 
-func (c connConf) Close() error {
+func (c *ConnConf) Close() error {
 	if c.isConnected {
-		c.conn.Close(context.Background())
+		c.Conn.Close(context.Background())
+		c.isConnected = false
 		return nil
 	}
 
