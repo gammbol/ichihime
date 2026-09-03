@@ -1,0 +1,102 @@
+package main
+
+import (
+	"context"
+	"log"
+	"net/http"
+	"os"
+	"os/signal"
+	"syscall"
+	"time"
+
+	"github.com/gammbol/ichihime/internal/db"
+	"github.com/gammbol/ichihime/internal/db/postgresdb"
+	"github.com/gammbol/ichihime/internal/router"
+
+	"github.com/gin-gonic/gin"
+	"github.com/joho/godotenv"
+)
+
+type Application struct {
+	db db.DBContract
+	routerApp *router.RouterApp
+
+	srv *http.Server
+}
+
+
+func main() {
+	dotenvErr := godotenv.Load()
+	if dotenvErr != nil {
+		log.Fatal("Error loading .env file")
+	}
+
+	// client.Init(os.Getenv("DATABASE_URL"), os.Getenv("API_URL"))
+	// // client.AddRoute("/albums", ichihime_http.TypeGet, GetAlbums)
+	// client.Run()
+
+	db, _ := postgresdb.New(os.Getenv("DATABASE_URL"))
+	rApp := router.New(os.Getenv("API_URL"))
+
+	app := NewApplication(db, rApp)
+
+	app.Run()
+}
+
+func NewApplication(db db.DBContract, rApp *router.RouterApp) *Application {
+	app := Application{
+		db: db, 
+		routerApp: rApp,
+		srv: &http.Server{
+			Addr:			":8080",
+			Handler:	rApp.Router.Handler(),
+		},
+	}
+
+	app.AddRouterHandler("/albums", router.TypeGet, func (c *gin.Context) {
+		res, resErr := app.db.GetAllAlbums()
+		if resErr != nil {
+			c.Error(resErr)
+			return
+		}
+
+		c.IndentedJSON(http.StatusOK, res)
+	})
+
+	return &app
+}
+
+func (this *Application) Run() {
+	// this.routerApp.Run()
+	defer this.db.Close()
+
+	go func() {
+		// service connection
+		if err := this.srv.ListenAndServe(); err != nil && err != http.ErrServerClosed {
+			log.Fatalf("listen: %v", err)
+		}
+	}()
+
+	// wait for interrupt signal to gracefully shutdown the server
+	quit := make(chan os.Signal, 1)
+	
+	// syscall.SIGKILL cannot be caught, so don't need add it
+	signal.Notify(quit, syscall.SIGINT, syscall.SIGTERM)
+	<-quit
+	log.Println("shutting down the server...")
+
+	ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
+	defer cancel()
+	if err := this.srv.Shutdown(ctx); err != nil {
+		log.Println("server shutdown:", err)
+	}
+	log.Println("exiting...")
+}
+
+
+// Callbacks
+func (this *Application) AddRouterHandler(path string, method router.MethodType, fn func (*gin.Context)) {
+	this.routerApp.AddRoute(path, method, fn)
+}
+
+
