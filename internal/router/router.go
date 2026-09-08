@@ -2,7 +2,6 @@ package router
 
 import (
 	"fmt"
-	"net/http"
 
 	"github.com/gin-gonic/gin"
 )
@@ -53,7 +52,7 @@ func ErrorHandler() gin.HandlerFunc {
 		if len(c.Errors) > 0 {
 			err := c.Errors.Last().Err
 
-			c.IndentedJSON(http.StatusInternalServerError, gin.H{
+			c.IndentedJSON(c.Writer.Status(), gin.H{
 				"success": false,
 				"message": err.Error(),
 			})

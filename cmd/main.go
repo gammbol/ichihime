@@ -6,6 +6,7 @@ import (
 	"net/http"
 	"os"
 	"os/signal"
+	"strconv"
 	"syscall"
 	"time"
 
@@ -53,9 +54,53 @@ func NewApplication(db db.DBContract, rApp *router.RouterApp) *Application {
 		},
 	}
 
-	app.AddRouterHandler("/albums", router.TypeGet, func (c *gin.Context) {
-		res, resErr := app.db.GetAllAlbums()
+	app.AddRouterHandler("/accounts", router.TypeGet, func (c *gin.Context) {
+		res, resErr := app.db.GetAllAccounts()
 		if resErr != nil {
+			c.Error(resErr)
+			return
+		}
+
+		c.IndentedJSON(http.StatusOK, res)
+	})
+	app.AddRouterHandler("/accounts/:id", router.TypeGet, func (c *gin.Context) {
+		id, idErr := strconv.Atoi(c.Param("id"))
+		if idErr != nil {
+			c.Status(http.StatusBadRequest)
+			c.Error(idErr)
+			return
+		}
+
+		res, resErr := app.db.GetAccountById(id)
+		if resErr != nil {
+			c.Status(http.StatusNotFound)
+			c.Error(resErr)
+			return
+		}
+
+		c.IndentedJSON(http.StatusOK, res)
+	})
+	app.AddRouterHandler("/transfers", router.TypeGet, func (c *gin.Context) {
+		res, resErr := app.db.GetAllTransfers()
+		if resErr != nil {
+			c.Status(http.StatusNotFound)
+			c.Error(resErr)
+			return
+		}
+
+		c.IndentedJSON(http.StatusOK, res)
+	})
+	app.AddRouterHandler("/transfers/:id", router.TypeGet, func (c *gin.Context) {
+		id, idErr := strconv.Atoi(c.Param("id"))
+		if idErr != nil {
+			c.Status(http.StatusBadRequest)
+			c.Error(idErr)
+			return
+		}
+
+		res, resErr := app.db.GetTransferById(id)
+		if resErr != nil {
+			c.Status(http.StatusNotFound)
 			c.Error(resErr)
 			return
 		}

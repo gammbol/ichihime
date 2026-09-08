@@ -7,5 +7,8 @@ import (
 type DBContract interface {
 	Close()
 	
-	GetAllAlbums() ([]storage.Album, error)
+	GetAllAccounts() ([]storage.Account, error)
+	GetAllTransfers() ([]storage.Transfer, error)
+	GetAccountById(id int) (storage.Account, error)
+	GetTransferById(id int) (storage.Transfer, error)
 }
