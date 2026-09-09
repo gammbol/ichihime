@@ -7,6 +7,7 @@ import (
 	"os"
 
 	"github.com/gammbol/ichihime/internal/storage"
+	"github.com/shopspring/decimal"
 
 	pgxdecimal "github.com/jackc/pgx-shopspring-decimal"
 	"github.com/jackc/pgx/v5"
@@ -99,4 +100,99 @@ func (this *Postgres) GetTransferById(id int) (storage.Transfer, error) {
 	}
 
 	return transfer, nil
+}
+
+func (this *Postgres) Transfer(source, dest int, amount decimal.Decimal) (storage.Transfer, error) {
+	if source <= 0 {
+		return storage.Transfer{}, fmt.Errorf("Transfer: source id cannot be negative or zero")
+	}
+	if dest <= 0 {
+		return storage.Transfer{}, fmt.Errorf("Transfer: destination id cannot be negative or zero")
+	}
+	if amount.Sign() <= 0 {
+		return storage.Transfer{}, fmt.Errorf("Transfer: amount cannot be negative or zero")
+	}
+
+	var transferRes storage.Transfer
+
+	row, execErr := this.poll.Query(
+		context.Background(),
+		"insert into transfers " +
+		"(source_id, dest_id, currency, amount, status) " +
+		"values ($1, $2, (select (currency) from accounts where id=$2), $3, 'pending') " +
+		"returning *",
+		source,
+		dest,
+		amount,
+	)
+	if execErr != nil {
+		return storage.Transfer{}, fmt.Errorf("Transfer (insert transfer): %v", execErr)
+	}
+	transferRes, collectErr := pgx.CollectExactlyOneRow(row, pgx.RowToStructByName[storage.Transfer])
+	if collectErr != nil {
+		return storage.Transfer{}, fmt.Errorf("Transfer (parse transfer): %v", collectErr)
+	}
+	
+
+	transactionErr := pgx.BeginTxFunc(
+		context.Background(),
+		this.poll,
+		pgx.TxOptions{
+			IsoLevel: pgx.Serializable,
+			AccessMode: pgx.ReadWrite,
+		},
+		func (tx pgx.Tx) error {
+			_, execErr := this.poll.Exec(
+				context.Background(),
+				"update accounts " +
+				"set balance = balance - $1 " +
+				"where id=$2",
+				amount,
+				source,
+			)
+			if execErr != nil {
+				return fmt.Errorf("Transfer (subtract): %v", execErr)
+			}
+
+			_, execErr = this.poll.Exec(
+				context.Background(),
+				"update accounts " +
+				"set balance = balance + $1 " +
+				"where id=$2",
+				amount,
+				dest,
+			)
+			if execErr != nil {
+				return fmt.Errorf("Transfer (add): %v", execErr)
+			}
+
+			return nil
+		},
+	)
+	if transactionErr != nil {
+		_, execErr = this.poll.Exec(
+			context.Background(),
+			"update transfers " +
+			"set status='failed' " +
+			"where id=$1",
+			transferRes.ID,
+		)
+		if execErr != nil {
+			return storage.Transfer{}, fmt.Errorf("Transfer (fail transfer query): %v", execErr)
+		}
+		return storage.Transfer{}, fmt.Errorf("Transfer (fail tranfer): %v", transactionErr)
+	} else {
+		_, execErr = this.poll.Exec(
+			context.Background(),
+			"update transfers " +
+			"set status='completed' " +
+			"where id=$1",
+			transferRes.ID,
+		)
+		if execErr != nil {
+			return storage.Transfer{}, fmt.Errorf("Transfer (complete transfer): %v", execErr)
+		}
+	}
+
+	return transferRes, nil
 }
