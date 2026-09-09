@@ -113,25 +113,26 @@ func (this *Postgres) Transfer(source, dest int, amount decimal.Decimal) (storag
 		return storage.Transfer{}, fmt.Errorf("Transfer: amount cannot be negative or zero")
 	}
 
+	var transferId int64
 	var transferRes storage.Transfer
 
-	row, execErr := this.poll.Query(
+	execErr := this.poll.QueryRow(
 		context.Background(),
 		"insert into transfers " +
 		"(source_id, dest_id, currency, amount, status) " +
 		"values ($1, $2, (select (currency) from accounts where id=$2), $3, 'pending') " +
-		"returning *",
+		"returning id",
 		source,
 		dest,
 		amount,
-	)
+	).Scan(&transferId)
 	if execErr != nil {
 		return storage.Transfer{}, fmt.Errorf("Transfer (insert transfer): %v", execErr)
 	}
-	transferRes, collectErr := pgx.CollectExactlyOneRow(row, pgx.RowToStructByName[storage.Transfer])
-	if collectErr != nil {
-		return storage.Transfer{}, fmt.Errorf("Transfer (parse transfer): %v", collectErr)
-	}
+	// transferRes, collectErr := pgx.CollectExactlyOneRow(row, pgx.RowToStructByName[storage.Transfer])
+	// if collectErr != nil {
+	// 	return storage.Transfer{}, fmt.Errorf("Transfer (parse transfer): %v", collectErr)
+	// }
 	
 
 	transactionErr := pgx.BeginTxFunc(
@@ -166,15 +167,21 @@ func (this *Postgres) Transfer(source, dest int, amount decimal.Decimal) (storag
 				return fmt.Errorf("Transfer (add): %v", execErr)
 			}
 
-			_, execErr = tx.Exec(
+			row, execErr := tx.Query(
 				context.Background(),
 				"update transfers " +
 				"set status='completed' " +
-				"where id=$1",
-				transferRes.ID,
+				"where id=$1 " +
+				"returning *",
+				transferId,
 			)
 			if execErr != nil {
 				return fmt.Errorf("Transfer (complete transfer): %v", execErr)
+			}
+			var collectErr error
+			transferRes, collectErr = pgx.CollectExactlyOneRow(row, pgx.RowToStructByName[storage.Transfer])
+			if collectErr != nil {
+				return fmt.Errorf("Transfer (parse complete transfer): %v", collectErr)
 			}
 
 			return nil
@@ -186,13 +193,13 @@ func (this *Postgres) Transfer(source, dest int, amount decimal.Decimal) (storag
 			"update transfers " +
 			"set status='failed' " +
 			"where id=$1",
-			transferRes.ID,
+			transferId,
 		)
 		if execErr != nil {
 			return storage.Transfer{}, fmt.Errorf("Transfer (fail transfer query): %v", execErr)
 		}
 		return storage.Transfer{}, fmt.Errorf("Transfer (fail tranfer): %v", transactionErr)
 	}
-	
+
 	return transferRes, nil
 }
