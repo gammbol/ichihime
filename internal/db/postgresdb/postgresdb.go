@@ -142,7 +142,7 @@ func (this *Postgres) Transfer(source, dest int, amount decimal.Decimal) (storag
 			AccessMode: pgx.ReadWrite,
 		},
 		func (tx pgx.Tx) error {
-			_, execErr := this.poll.Exec(
+			_, execErr := tx.Exec(
 				context.Background(),
 				"update accounts " +
 				"set balance = balance - $1 " +
@@ -154,7 +154,7 @@ func (this *Postgres) Transfer(source, dest int, amount decimal.Decimal) (storag
 				return fmt.Errorf("Transfer (subtract): %v", execErr)
 			}
 
-			_, execErr = this.poll.Exec(
+			_, execErr = tx.Exec(
 				context.Background(),
 				"update accounts " +
 				"set balance = balance + $1 " +
@@ -164,6 +164,17 @@ func (this *Postgres) Transfer(source, dest int, amount decimal.Decimal) (storag
 			)
 			if execErr != nil {
 				return fmt.Errorf("Transfer (add): %v", execErr)
+			}
+
+			_, execErr = tx.Exec(
+				context.Background(),
+				"update transfers " +
+				"set status='completed' " +
+				"where id=$1",
+				transferRes.ID,
+			)
+			if execErr != nil {
+				return fmt.Errorf("Transfer (complete transfer): %v", execErr)
 			}
 
 			return nil
@@ -181,18 +192,7 @@ func (this *Postgres) Transfer(source, dest int, amount decimal.Decimal) (storag
 			return storage.Transfer{}, fmt.Errorf("Transfer (fail transfer query): %v", execErr)
 		}
 		return storage.Transfer{}, fmt.Errorf("Transfer (fail tranfer): %v", transactionErr)
-	} else {
-		_, execErr = this.poll.Exec(
-			context.Background(),
-			"update transfers " +
-			"set status='completed' " +
-			"where id=$1",
-			transferRes.ID,
-		)
-		if execErr != nil {
-			return storage.Transfer{}, fmt.Errorf("Transfer (complete transfer): %v", execErr)
-		}
 	}
-
+	
 	return transferRes, nil
 }
