@@ -13,7 +13,7 @@ import (
 	"github.com/gammbol/ichihime/internal/db"
 	"github.com/gammbol/ichihime/internal/db/postgresdb"
 	"github.com/gammbol/ichihime/internal/router"
-	"github.com/shopspring/decimal"
+	"github.com/gammbol/ichihime/internal/storage"
 
 	"github.com/gin-gonic/gin"
 	"github.com/joho/godotenv"
@@ -110,24 +110,15 @@ func NewApplication(db db.DBContract, rApp *router.RouterApp) *Application {
 	})
 
 	app.AddRouterHandler("/pay", router.TypePost, func (c *gin.Context) {
-		source, atoiErr := strconv.Atoi(c.PostForm("source"))
-		if atoiErr != nil {
-			c.Error(atoiErr)
-			return
-		}
-		dest, atoiErr := strconv.Atoi(c.PostForm("dest"))
-		if atoiErr != nil {
-			c.Error(atoiErr)
-			return
-		}
-		amount, atoiErr := decimal.NewFromString(c.PostForm("amount"))
-		if atoiErr != nil {
-			c.Error(atoiErr)
-			return
+		var transferForm storage.TransferForm
+		if err := c.ShouldBind(&transferForm); err != nil {
+			c.Status(http.StatusBadRequest)
+			c.Error(err)
 		}
 
-		res, transferErr := app.db.Transfer(source, dest, amount)
+		res, transferErr := app.db.Transfer(transferForm)
 		if transferErr != nil {
+			c.Status(http.StatusInternalServerError)
 			c.Error(transferErr)
 			return
 		}

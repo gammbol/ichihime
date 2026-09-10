@@ -2,7 +2,6 @@ package db
 
 import (
 	"github.com/gammbol/ichihime/internal/storage"
-	"github.com/shopspring/decimal"
 )
 
 type DBContract interface {
@@ -12,5 +11,5 @@ type DBContract interface {
 	GetAllTransfers() ([]storage.Transfer, error)
 	GetAccountById(int) (storage.Account, error)
 	GetTransferById(int) (storage.Transfer, error)
-	Transfer(int, int, decimal.Decimal) (storage.Transfer, error)
+	Transfer(storage.TransferForm) (storage.Transfer, error)
 }

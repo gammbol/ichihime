@@ -7,11 +7,11 @@ import (
 	"os"
 
 	"github.com/gammbol/ichihime/internal/storage"
-	"github.com/shopspring/decimal"
 
 	pgxdecimal "github.com/jackc/pgx-shopspring-decimal"
 	"github.com/jackc/pgx/v5"
 	"github.com/jackc/pgx/v5/pgxpool"
+	"github.com/shopspring/decimal"
 )
 
 type Postgres struct {
@@ -102,19 +102,85 @@ func (this *Postgres) GetTransferById(id int) (storage.Transfer, error) {
 	return transfer, nil
 }
 
-func (this *Postgres) Transfer(source, dest int, amount decimal.Decimal) (storage.Transfer, error) {
-	if source <= 0 {
-		return storage.Transfer{}, fmt.Errorf("Transfer: source id cannot be negative or zero")
+func validateForm(tf storage.TransferForm) error {
+	if tf.Source <= 0 {
+		return fmt.Errorf("source id cannot be negative or zero")
 	}
-	if dest <= 0 {
-		return storage.Transfer{}, fmt.Errorf("Transfer: destination id cannot be negative or zero")
+	if tf.Destination <= 0 {
+		return fmt.Errorf("destination id cannot be negative or zero")
 	}
-	if amount.Sign() <= 0 {
-		return storage.Transfer{}, fmt.Errorf("Transfer: amount cannot be negative or zero")
+	if tf.Amount.Sign() <= 0 {
+		return fmt.Errorf("amount cannot be negative or zero")
+	}
+	if tf.Source == tf.Destination {
+		return fmt.Errorf("source and destination ids cannot be equal")
+	}
+
+	return nil
+}
+
+func transactionHandler(transferId int64, transferForm storage.TransferForm) func (pgx.Tx) error {
+	return func (tx pgx.Tx) error {
+		_, execErr := tx.Exec(
+			context.Background(),
+			"update accounts " +
+			"set balance = balance - $1 " +
+			"where id=$2",
+			transferForm.Amount,
+			transferForm.Source,
+		)
+		if execErr != nil {
+			return fmt.Errorf("Transfer (subtract): %v", execErr)
+		}
+
+		var sourceBalance decimal.Decimal
+		queryRowErr := tx.QueryRow(
+			context.Background(),
+			"select (balance) from accounts where id=$1",
+			transferForm.Source,
+		).Scan(&sourceBalance)
+		if queryRowErr != nil {
+			return fmt.Errorf("Transfer (select source balance): %v", queryRowErr)
+		}
+
+		if transferForm.Amount.Compare(sourceBalance) > 0 {
+			return fmt.Errorf("Transfer (source balance validation): not enough money to make the transfer")
+		}
+
+		_, execErr = tx.Exec(
+			context.Background(),
+			"update accounts " +
+			"set balance = balance + $1 " +
+			"where id=$2",
+			transferForm.Amount,
+			transferForm.Destination,
+		)
+		if execErr != nil {
+			return fmt.Errorf("Transfer (add): %v", execErr)
+		}
+
+		_, execErr = tx.Exec(
+			context.Background(),
+			"update transfers " +
+			"set status='completed' " +
+			"where id=$1 ",
+			transferId,
+		)
+		if execErr != nil {
+			return fmt.Errorf("Transfer (complete transfer): %v", execErr)
+		}
+
+		return nil
+	}
+}
+
+func (this *Postgres) Transfer(transferForm storage.TransferForm) (storage.Transfer, error) {
+	err := validateForm(transferForm)
+	if err != nil {
+		return storage.Transfer{}, fmt.Errorf("Transfer: %v", err)
 	}
 
 	var transferId int64
-	var transferRes storage.Transfer
 
 	execErr := this.poll.QueryRow(
 		context.Background(),
@@ -122,9 +188,9 @@ func (this *Postgres) Transfer(source, dest int, amount decimal.Decimal) (storag
 		"(source_id, dest_id, currency, amount, status) " +
 		"values ($1, $2, (select (currency) from accounts where id=$2), $3, 'pending') " +
 		"returning id",
-		source,
-		dest,
-		amount,
+		transferForm.Source,
+		transferForm.Destination,
+		transferForm.Amount,
 	).Scan(&transferId)
 	if execErr != nil {
 		return storage.Transfer{}, fmt.Errorf("Transfer (insert transfer): %v", execErr)
@@ -142,50 +208,7 @@ func (this *Postgres) Transfer(source, dest int, amount decimal.Decimal) (storag
 			IsoLevel: pgx.Serializable,
 			AccessMode: pgx.ReadWrite,
 		},
-		func (tx pgx.Tx) error {
-			_, execErr := tx.Exec(
-				context.Background(),
-				"update accounts " +
-				"set balance = balance - $1 " +
-				"where id=$2",
-				amount,
-				source,
-			)
-			if execErr != nil {
-				return fmt.Errorf("Transfer (subtract): %v", execErr)
-			}
-
-			_, execErr = tx.Exec(
-				context.Background(),
-				"update accounts " +
-				"set balance = balance + $1 " +
-				"where id=$2",
-				amount,
-				dest,
-			)
-			if execErr != nil {
-				return fmt.Errorf("Transfer (add): %v", execErr)
-			}
-
-			row, execErr := tx.Query(
-				context.Background(),
-				"update transfers " +
-				"set status='completed' " +
-				"where id=$1 " +
-				"returning *",
-				transferId,
-			)
-			if execErr != nil {
-				return fmt.Errorf("Transfer (complete transfer): %v", execErr)
-			}
-			var collectErr error
-			transferRes, collectErr = pgx.CollectExactlyOneRow(row, pgx.RowToStructByName[storage.Transfer])
-			if collectErr != nil {
-				return fmt.Errorf("Transfer (parse complete transfer): %v", collectErr)
-			}
-
-			return nil
-		},
+		transactionHandler(transferId, transferForm),
 	)
 	if transactionErr != nil {
 		_, execErr = this.poll.Exec(
@@ -198,7 +221,20 @@ func (this *Postgres) Transfer(source, dest int, amount decimal.Decimal) (storag
 		if execErr != nil {
 			return storage.Transfer{}, fmt.Errorf("Transfer (fail transfer query): %v", execErr)
 		}
-		return storage.Transfer{}, fmt.Errorf("Transfer (fail tranfer): %v", transactionErr)
+		return storage.Transfer{}, fmt.Errorf("Transfer (fail transfer): %v", transactionErr)
+	}
+
+	row, queryErr := this.poll.Query(
+		context.Background(),
+		"select * from transfers where id = $1",
+		transferId,
+	)
+	if queryErr != nil {
+		return storage.Transfer{}, fmt.Errorf("Transfer (final select): %v", queryErr)
+	}
+	transferRes, collectErr := pgx.CollectExactlyOneRow(row, pgx.RowToStructByName[storage.Transfer])
+	if collectErr != nil {
+		return storage.Transfer{}, fmt.Errorf("Transfer (final collect): %v", collectErr)
 	}
 
 	return transferRes, nil

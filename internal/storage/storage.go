@@ -20,5 +20,11 @@ type Transfer struct {
 	Amount			decimal.Decimal	`json:"amount"`
 	Currency		string					`json:"currency"`
 	Status			string					`json:"status"`	
-	Created_at	time.Time				`json:"created_ad"`
+	Created_at	time.Time				`json:"created_at"`
+}
+
+type TransferForm struct {
+	Source			int							`form:"source" binding:"required"`
+	Destination	int							`form:"dest" binding:"required"`
+	Amount			decimal.Decimal	`form:"amount" binding:"required"`
 }
