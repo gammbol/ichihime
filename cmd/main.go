@@ -114,6 +114,7 @@ func NewApplication(db db.DBContract, rApp *router.RouterApp) *Application {
 		if err := c.ShouldBind(&transferForm); err != nil {
 			c.Status(http.StatusBadRequest)
 			c.Error(err)
+			return
 		}
 
 		res, transferErr := app.db.Transfer(transferForm)

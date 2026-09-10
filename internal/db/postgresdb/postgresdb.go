@@ -121,18 +121,6 @@ func validateForm(tf storage.TransferForm) error {
 
 func transactionHandler(transferId int64, transferForm storage.TransferForm) func (pgx.Tx) error {
 	return func (tx pgx.Tx) error {
-		_, execErr := tx.Exec(
-			context.Background(),
-			"update accounts " +
-			"set balance = balance - $1 " +
-			"where id=$2",
-			transferForm.Amount,
-			transferForm.Source,
-		)
-		if execErr != nil {
-			return fmt.Errorf("Transfer (subtract): %v", execErr)
-		}
-
 		var sourceBalance decimal.Decimal
 		queryRowErr := tx.QueryRow(
 			context.Background(),
@@ -145,6 +133,18 @@ func transactionHandler(transferId int64, transferForm storage.TransferForm) fun
 
 		if transferForm.Amount.Compare(sourceBalance) > 0 {
 			return fmt.Errorf("Transfer (source balance validation): not enough money to make the transfer")
+		}
+		
+		_, execErr := tx.Exec(
+			context.Background(),
+			"update accounts " +
+			"set balance = balance - $1 " +
+			"where id=$2",
+			transferForm.Amount,
+			transferForm.Source,
+		)
+		if execErr != nil {
+			return fmt.Errorf("Transfer (subtract): %v", execErr)
 		}
 
 		_, execErr = tx.Exec(
