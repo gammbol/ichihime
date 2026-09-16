@@ -2,16 +2,26 @@ package postgresdb
 
 import (
 	"context"
+	"errors"
 	"fmt"
 	"log"
+	"math/rand"
 	"os"
+	"time"
 
 	"github.com/gammbol/ichihime/internal/storage"
 
 	pgxdecimal "github.com/jackc/pgx-shopspring-decimal"
 	"github.com/jackc/pgx/v5"
+	"github.com/jackc/pgx/v5/pgconn"
 	"github.com/jackc/pgx/v5/pgxpool"
 	"github.com/shopspring/decimal"
+)
+
+const (
+    maxRetries = 10
+    baseDelay  = 100 * time.Millisecond
+    maxDelay   = 500 * time.Millisecond
 )
 
 type Postgres struct {
@@ -121,6 +131,16 @@ func validateForm(tf storage.TransferForm) error {
 
 func transactionHandler(transferId int64, transferForm storage.TransferForm) func (pgx.Tx) error {
 	return func (tx pgx.Tx) error {
+		// _, lockErr := tx.Exec(
+		// 	context.Background(), 
+		// 	"select 1 from accounts where id in ($1, $2) order by id FOR NO KEY UPDATE",
+		// 	transferForm.Source,
+		// 	transferForm.Destination,
+		// )
+		// if lockErr != nil {
+		// 	return fmt.Errorf("Transfer (lock): %v", lockErr)
+		// }
+
 		var sourceBalance decimal.Decimal
 		queryRowErr := tx.QueryRow(
 			context.Background(),
@@ -174,6 +194,25 @@ func transactionHandler(transferId int64, transferForm storage.TransferForm) fun
 	}
 }
 
+func isRetryableError(err error) bool {
+	var pgErr *pgconn.PgError
+
+	if !errors.As(err, &pgErr) {
+		return false
+	}
+
+	switch pgErr.Code {
+	case "40001":
+		return true
+
+	case "40P01":
+		return true
+
+	default:
+		return false
+	}
+}
+
 func (this *Postgres) Transfer(transferForm storage.TransferForm) (storage.Transfer, error) {
 	err := validateForm(transferForm)
 	if err != nil {
@@ -200,17 +239,50 @@ func (this *Postgres) Transfer(transferForm storage.TransferForm) (storage.Trans
 	// 	return storage.Transfer{}, fmt.Errorf("Transfer (parse transfer): %v", collectErr)
 	// }
 	
+	var transactionErr error
+	for retries := 0; retries < maxRetries; retries++ {
+		transactionErr = pgx.BeginTxFunc(
+			context.Background(),
+			this.poll,
+			pgx.TxOptions{
+				IsoLevel: pgx.Serializable,
+				AccessMode: pgx.ReadWrite,
+			},
+			transactionHandler(transferId, transferForm),
+		)
+		if transactionErr != nil && isRetryableError(transactionErr) {
+			backoff := baseDelay * time.Duration(1<<retries)
+			if backoff > maxDelay {
+					backoff = maxDelay
+			}
 
-	transactionErr := pgx.BeginTxFunc(
-		context.Background(),
-		this.poll,
-		pgx.TxOptions{
-			IsoLevel: pgx.Serializable,
-			AccessMode: pgx.ReadWrite,
-		},
-		transactionHandler(transferId, transferForm),
-	)
+			delay := time.Duration(rand.Int63n(int64(backoff)))
+
+			log.Printf(
+					"transaction conflict, retrying (attempt %d, delay %s): %v",
+					retries+1,
+					delay,
+					transactionErr,
+			)
+
+			timer := time.NewTimer(delay)
+
+			select {
+			case <-timer.C:
+					continue
+
+			case <-context.Background().Done():
+					if !timer.Stop() {
+							<-timer.C
+					}
+					return storage.Transfer{}, context.Background().Err()
+			}
+		}
+		
+		break
+	}
 	if transactionErr != nil {
+		// log.Printf("ERROR DEBUGGING: %v\n", transactionErr)
 		_, execErr = this.poll.Exec(
 			context.Background(),
 			"update transfers " +
