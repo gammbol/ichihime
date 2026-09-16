@@ -21,7 +21,7 @@ import (
 const (
     maxRetries = 10
     baseDelay  = 100 * time.Millisecond
-    maxDelay   = 500 * time.Millisecond
+    maxDelay   = 1000 * time.Millisecond
 )
 
 type Postgres struct {
@@ -148,7 +148,7 @@ func transactionHandler(transferId int64, transferForm storage.TransferForm) fun
 			transferForm.Source,
 		).Scan(&sourceBalance)
 		if queryRowErr != nil {
-			return fmt.Errorf("Transfer (select source balance): %v", queryRowErr)
+			return fmt.Errorf("Transfer (select source balance): %w", queryRowErr)
 		}
 
 		if transferForm.Amount.Compare(sourceBalance) > 0 {
@@ -164,7 +164,7 @@ func transactionHandler(transferId int64, transferForm storage.TransferForm) fun
 			transferForm.Source,
 		)
 		if execErr != nil {
-			return fmt.Errorf("Transfer (subtract): %v", execErr)
+			return fmt.Errorf("Transfer (subtract): %w", execErr)
 		}
 
 		_, execErr = tx.Exec(
@@ -176,7 +176,7 @@ func transactionHandler(transferId int64, transferForm storage.TransferForm) fun
 			transferForm.Destination,
 		)
 		if execErr != nil {
-			return fmt.Errorf("Transfer (add): %v", execErr)
+			return fmt.Errorf("Transfer (add): %w", execErr)
 		}
 
 		_, execErr = tx.Exec(
@@ -187,7 +187,7 @@ func transactionHandler(transferId int64, transferForm storage.TransferForm) fun
 			transferId,
 		)
 		if execErr != nil {
-			return fmt.Errorf("Transfer (complete transfer): %v", execErr)
+			return fmt.Errorf("Transfer (complete transfer): %w", execErr)
 		}
 
 		return nil
