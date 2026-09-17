@@ -2,6 +2,7 @@ package main
 
 import (
 	"context"
+	"errors"
 	"log"
 	"net/http"
 	"os"
@@ -14,18 +15,20 @@ import (
 	"github.com/gammbol/ichihime/internal/db/postgresdb"
 	"github.com/gammbol/ichihime/internal/router"
 	"github.com/gammbol/ichihime/internal/storage"
+	uuidcache "github.com/gammbol/ichihime/internal/uuid_cache"
+	rediscache "github.com/gammbol/ichihime/internal/uuid_cache/redis"
 
 	"github.com/gin-gonic/gin"
 	"github.com/joho/godotenv"
 )
 
 type Application struct {
-	db db.DBContract
-	routerApp *router.RouterApp
+	db 					db.DBContract
+	uuid_cache	uuidcache.UUIDCacheContract
+	routerApp 	*router.RouterApp
 
 	srv *http.Server
 }
-
 
 func main() {
 	dotenvErr := godotenv.Load()
@@ -37,17 +40,23 @@ func main() {
 	// // client.AddRoute("/albums", ichihime_http.TypeGet, GetAlbums)
 	// client.Run()
 
-	db, _ := postgresdb.New(os.Getenv("DATABASE_URL"))
+	db := postgresdb.New(os.Getenv("DATABASE_URL"))
+	uuid_cache := rediscache.New(os.Getenv("UUID_CACHE_URL"))
 	rApp := router.New(os.Getenv("API_URL"))
 
-	app := NewApplication(db, rApp)
+	app := NewApplication(
+		db,
+		uuid_cache,
+		rApp,
+	)
 
 	app.Run()
 }
 
-func NewApplication(db db.DBContract, rApp *router.RouterApp) *Application {
+func NewApplication(db db.DBContract, uuid_cache uuidcache.UUIDCacheContract, rApp *router.RouterApp) *Application {
 	app := Application{
 		db: db, 
+		uuid_cache: uuid_cache,
 		routerApp: rApp,
 		srv: &http.Server{
 			Addr:			":8080",
@@ -117,14 +126,54 @@ func NewApplication(db db.DBContract, rApp *router.RouterApp) *Application {
 			return
 		}
 
-		res, transferErr := app.db.Transfer(transferForm)
-		if transferErr != nil {
-			c.Status(http.StatusInternalServerError)
-			c.Error(transferErr)
+		idempotencyKey := storage.Idempotency{}
+		if err := c.ShouldBindHeader(&idempotencyKey); err != nil {
+			c.Status(http.StatusBadRequest)
+			c.Error(errors.New("No bitches? т_т"))
 			return
 		}
 
-		c.IndentedJSON(http.StatusOK, res)
+		idempotencyErr := uuid_cache.Get(&idempotencyKey)
+		if idempotencyErr != nil {
+			idempotencyKey.Status = "pending"
+
+			idempotencyErr := uuid_cache.Set(idempotencyKey)
+			if idempotencyErr != nil {
+				c.Status(http.StatusInternalServerError)
+				c.Error(idempotencyErr)
+				return
+			}
+
+			res, transferErr := app.db.Transfer(transferForm)
+			if transferErr != nil {
+				c.Status(http.StatusInternalServerError)
+				c.Error(transferErr)
+				return
+			}
+
+			c.IndentedJSON(http.StatusOK, res)
+			return
+		}
+
+		switch idempotencyKey.Status {
+		case "pending":
+			c.Status(http.StatusConflict)
+			c.Error(errors.New("Your request is already in process!"))
+			return 
+		case "completed":
+			c.Status(http.StatusConflict)
+			c.Error(errors.New("Your request is already processed!"))
+			return
+		case "failed":
+			c.Status(http.StatusBadRequest)
+			c.Error(errors.New("Your request has been failed! Please try again!"))
+			return
+
+		default:
+			c.Status(http.StatusInternalServerError)
+			c.Error(errors.New("Oops... Something went wrong!"))
+			return
+		}
 	})
 
 	return &app
@@ -133,6 +182,7 @@ func NewApplication(db db.DBContract, rApp *router.RouterApp) *Application {
 func (this *Application) Run() {
 	// this.routerApp.Run()
 	defer this.db.Close()
+	defer this.uuid_cache.Close()
 
 	go func() {
 		// service connection

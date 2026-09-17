@@ -28,7 +28,7 @@ type Postgres struct {
 	poll *pgxpool.Pool
 }
 
-func New(connectionString string) (*Postgres, error) {
+func New(connectionString string) *Postgres {
 	config, confErr := pgxpool.ParseConfig(os.Getenv("DATABASE_URL"))
 	if confErr != nil {
 		log.Fatalf("postgresql config parse failure: %v", confErr)
@@ -49,7 +49,7 @@ func New(connectionString string) (*Postgres, error) {
 		log.Fatalf("postgres ping failure: %v", pingErr)
 	}
 
-	return &Postgres{poll}, nil
+	return &Postgres{poll}
 }
 
 func (this *Postgres) Close() {

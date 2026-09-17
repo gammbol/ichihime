@@ -28,3 +28,8 @@ type TransferForm struct {
 	Destination	int							`form:"dest" binding:"required"`
 	Amount			decimal.Decimal	`form:"amount" binding:"required"`
 }
+
+type Idempotency struct {
+	Key			string		`redis:"uuid" header:"idempotency-key" binding:"required"`
+	Status	string 		`redis:"status"`
+}
