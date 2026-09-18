@@ -7,4 +7,5 @@ type UUIDCacheContract interface {
 
 	Get(*storage.Idempotency) error
 	Set(storage.Idempotency) error
+	SetNx(id storage.Idempotency) (bool, error)
 }

@@ -25,10 +25,11 @@ const (
 )
 
 type Postgres struct {
+	ctx context.Context
 	poll *pgxpool.Pool
 }
 
-func New(connectionString string) *Postgres {
+func New(connectionString string, ctx context.Context) *Postgres {
 	config, confErr := pgxpool.ParseConfig(os.Getenv("DATABASE_URL"))
 	if confErr != nil {
 		log.Fatalf("postgresql config parse failure: %v", confErr)
@@ -39,17 +40,20 @@ func New(connectionString string) *Postgres {
 		return nil
 	}
 
-	poll, pollErr := pgxpool.NewWithConfig(context.Background(), config)
+	poll, pollErr := pgxpool.NewWithConfig(ctx, config)
 	if pollErr != nil {
 		log.Fatalf("postgresql poll creation failure: %v", pollErr)
 	}
 
-	pingErr := poll.Ping(context.Background())
+	pingErr := poll.Ping(ctx)
 	if pingErr != nil {
 		log.Fatalf("postgres ping failure: %v", pingErr)
 	}
 
-	return &Postgres{poll}
+	return &Postgres{
+		poll: poll, 
+		ctx: ctx,
+	}
 }
 
 func (this *Postgres) Close() {
@@ -57,7 +61,7 @@ func (this *Postgres) Close() {
 }
 
 func (this *Postgres) GetAllAccounts() ([]storage.Account, error) {
-	rows, queryErr := this.poll.Query(context.Background(), "select * from accounts")
+	rows, queryErr := this.poll.Query(this.ctx, "select * from accounts")
 	if queryErr != nil {
 		return nil, fmt.Errorf("GetAllAccounts: %v", queryErr)
 	}
@@ -71,7 +75,7 @@ func (this *Postgres) GetAllAccounts() ([]storage.Account, error) {
 }
 
 func (this *Postgres) GetAccountById(id int) (storage.Account, error) {
-	row, queryErr := this.poll.Query(context.Background(), "select * from accounts where id = $1", id)
+	row, queryErr := this.poll.Query(this.ctx, "select * from accounts where id = $1", id)
 	if queryErr != nil {
 		return storage.Account{}, fmt.Errorf("GetAccountById: %v", queryErr)
 	}
@@ -85,7 +89,7 @@ func (this *Postgres) GetAccountById(id int) (storage.Account, error) {
 }
 
 func (this *Postgres) GetAllTransfers() ([]storage.Transfer, error) {
-	rows, queryErr := this.poll.Query(context.Background(), "select * from transfers")
+	rows, queryErr := this.poll.Query(this.ctx, "select * from transfers")
 	if queryErr != nil {
 		return nil, fmt.Errorf("GetAllTransfers: %v", queryErr)
 	}
@@ -99,7 +103,7 @@ func (this *Postgres) GetAllTransfers() ([]storage.Transfer, error) {
 }
 
 func (this *Postgres) GetTransferById(id int) (storage.Transfer, error) {
-	row, queryErr := this.poll.Query(context.Background(), "select * from transfers where id = $1", id)
+	row, queryErr := this.poll.Query(this.ctx, "select * from transfers where id = $1", id)
 	if queryErr != nil {
 		return storage.Transfer{}, fmt.Errorf("GetTransferById: %v", queryErr)
 	}
@@ -129,10 +133,10 @@ func validateForm(tf storage.TransferForm) error {
 	return nil
 }
 
-func transactionHandler(transferId int64, transferForm storage.TransferForm) func (pgx.Tx) error {
+func transactionHandler(transferId int64, transferForm storage.TransferForm, this Postgres) func (pgx.Tx) error {
 	return func (tx pgx.Tx) error {
 		// _, lockErr := tx.Exec(
-		// 	context.Background(), 
+		// 	this.ctx, 
 		// 	"select 1 from accounts where id in ($1, $2) order by id FOR NO KEY UPDATE",
 		// 	transferForm.Source,
 		// 	transferForm.Destination,
@@ -143,7 +147,7 @@ func transactionHandler(transferId int64, transferForm storage.TransferForm) fun
 
 		var sourceBalance decimal.Decimal
 		queryRowErr := tx.QueryRow(
-			context.Background(),
+			this.ctx,
 			"select (balance) from accounts where id=$1",
 			transferForm.Source,
 		).Scan(&sourceBalance)
@@ -156,7 +160,7 @@ func transactionHandler(transferId int64, transferForm storage.TransferForm) fun
 		}
 		
 		_, execErr := tx.Exec(
-			context.Background(),
+			this.ctx,
 			"update accounts " +
 			"set balance = balance - $1 " +
 			"where id=$2",
@@ -168,7 +172,7 @@ func transactionHandler(transferId int64, transferForm storage.TransferForm) fun
 		}
 
 		_, execErr = tx.Exec(
-			context.Background(),
+			this.ctx,
 			"update accounts " +
 			"set balance = balance + $1 " +
 			"where id=$2",
@@ -180,7 +184,7 @@ func transactionHandler(transferId int64, transferForm storage.TransferForm) fun
 		}
 
 		_, execErr = tx.Exec(
-			context.Background(),
+			this.ctx,
 			"update transfers " +
 			"set status='completed' " +
 			"where id=$1 ",
@@ -222,7 +226,7 @@ func (this *Postgres) Transfer(transferForm storage.TransferForm) (storage.Trans
 	var transferId int64
 
 	execErr := this.poll.QueryRow(
-		context.Background(),
+		this.ctx,
 		"insert into transfers " +
 		"(source_id, dest_id, currency, amount, status) " +
 		"values ($1, $2, (select (currency) from accounts where id=$2), $3, 'pending') " +
@@ -242,13 +246,13 @@ func (this *Postgres) Transfer(transferForm storage.TransferForm) (storage.Trans
 	var transactionErr error
 	for retries := 0; retries < maxRetries; retries++ {
 		transactionErr = pgx.BeginTxFunc(
-			context.Background(),
+			this.ctx,
 			this.poll,
 			pgx.TxOptions{
 				IsoLevel: pgx.Serializable,
 				AccessMode: pgx.ReadWrite,
 			},
-			transactionHandler(transferId, transferForm),
+			transactionHandler(transferId, transferForm, *this),
 		)
 		if transactionErr != nil && isRetryableError(transactionErr) {
 			backoff := baseDelay * time.Duration(1<<retries)
@@ -271,11 +275,11 @@ func (this *Postgres) Transfer(transferForm storage.TransferForm) (storage.Trans
 			case <-timer.C:
 					continue
 
-			case <-context.Background().Done():
+			case <-(this.ctx).Done():
 					if !timer.Stop() {
 							<-timer.C
 					}
-					return storage.Transfer{}, context.Background().Err()
+					return storage.Transfer{}, (this.ctx).Err()
 			}
 		}
 		
@@ -284,7 +288,7 @@ func (this *Postgres) Transfer(transferForm storage.TransferForm) (storage.Trans
 	if transactionErr != nil {
 		// log.Printf("ERROR DEBUGGING: %v\n", transactionErr)
 		_, execErr = this.poll.Exec(
-			context.Background(),
+			this.ctx,
 			"update transfers " +
 			"set status='failed' " +
 			"where id=$1",
@@ -297,7 +301,7 @@ func (this *Postgres) Transfer(transferForm storage.TransferForm) (storage.Trans
 	}
 
 	row, queryErr := this.poll.Query(
-		context.Background(),
+		this.ctx,
 		"select * from transfers where id = $1",
 		transferId,
 	)

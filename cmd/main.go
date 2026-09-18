@@ -17,13 +17,13 @@ import (
 	"github.com/gammbol/ichihime/internal/storage"
 	uuidcache "github.com/gammbol/ichihime/internal/uuid_cache"
 	rediscache "github.com/gammbol/ichihime/internal/uuid_cache/redis"
-	"github.com/redis/go-redis/v9"
 
 	"github.com/gin-gonic/gin"
 	"github.com/joho/godotenv"
 )
 
 type Application struct {
+	ctx					context.Context
 	db 					db.DBContract
 	uuid_cache	uuidcache.UUIDCacheContract
 	routerApp 	*router.RouterApp
@@ -40,9 +40,9 @@ func main() {
 	// client.Init(os.Getenv("DATABASE_URL"), os.Getenv("API_URL"))
 	// // client.AddRoute("/albums", ichihime_http.TypeGet, GetAlbums)
 	// client.Run()
-
-	db := postgresdb.New(os.Getenv("DATABASE_URL"))
-	uuid_cache := rediscache.New(os.Getenv("UUID_CACHE_URL"))
+	ctx := context.Background()
+	db := postgresdb.New(os.Getenv("DATABASE_URL"), ctx)
+	uuid_cache := rediscache.New(os.Getenv("UUID_CACHE_URL"), ctx)
 	rApp := router.New(os.Getenv("API_URL"))
 
 	app := NewApplication(
@@ -56,6 +56,7 @@ func main() {
 
 func NewApplication(db db.DBContract, uuid_cache uuidcache.UUIDCacheContract, rApp *router.RouterApp) *Application {
 	app := Application{
+		ctx: context.Background(),
 		db: db, 
 		uuid_cache: uuid_cache,
 		routerApp: rApp,
@@ -134,8 +135,41 @@ func NewApplication(db db.DBContract, uuid_cache uuidcache.UUIDCacheContract, rA
 			return
 		}
 
-		idempotencyErr := uuid_cache.Get(&idempotencyKey)
-		if idempotencyErr == nil {
+		print(idempotencyKey.Key)
+		idempotencyKey.Status = "pending"
+		idempotencyRes, idempotencyErr := uuid_cache.SetNx(idempotencyKey)
+		if idempotencyErr != nil {
+			c.Status(http.StatusInternalServerError)
+			c.Error(idempotencyErr)
+			return
+		}
+
+		// if idempotencyErr == redis.Nil {
+
+		// 	idempotencyErr := uuid_cache.Set(idempotencyKey)
+		// 	if idempotencyErr != nil {
+		// 		c.Status(http.StatusInternalServerError)
+		// 		c.Error(idempotencyErr)
+		// 		return
+		// 	}
+
+		// 	res, transferErr := app.db.Transfer(transferForm)
+		// 	if transferErr != nil {
+		// 		idempotencyKey.Status = "failed"
+		// 		uuid_cache.Set(idempotencyKey)
+		// 		c.Status(http.StatusInternalServerError)
+		// 		c.Error(transferErr)
+		// 		return
+		// 	}
+
+		// 	idempotencyKey.Status = "completed"
+		// 	uuid_cache.Set(idempotencyKey)
+		// 	c.IndentedJSON(http.StatusOK, res)
+		// 	return
+		// }
+
+		if !idempotencyRes {
+			uuid_cache.Get(&idempotencyKey)
 			switch idempotencyKey.Status {
 			case "pending":
 				c.Status(http.StatusConflict)
@@ -157,34 +191,22 @@ func NewApplication(db db.DBContract, uuid_cache uuidcache.UUIDCacheContract, rA
 			}
 		}
 
-		if idempotencyErr == redis.Nil {
-			idempotencyKey.Status = "pending"
-
-			idempotencyErr := uuid_cache.Set(idempotencyKey)
-			if idempotencyErr != nil {
-				c.Status(http.StatusInternalServerError)
-				c.Error(idempotencyErr)
-				return
-			}
-
-			res, transferErr := app.db.Transfer(transferForm)
-			if transferErr != nil {
-				idempotencyKey.Status = "failed"
-				uuid_cache.Set(idempotencyKey)
-				c.Status(http.StatusInternalServerError)
-				c.Error(transferErr)
-				return
-			}
-
-			idempotencyKey.Status = "completed"
+		res, transferErr := app.db.Transfer(transferForm)
+		if transferErr != nil {
+			idempotencyKey.Status = "failed"
 			uuid_cache.Set(idempotencyKey)
-			c.IndentedJSON(http.StatusOK, res)
+			c.Status(http.StatusInternalServerError)
+			c.Error(transferErr)
 			return
 		}
 
-		print("wtf...")
-		c.Status(http.StatusInternalServerError)
-		c.Error(idempotencyErr)
+		idempotencyKey.Status = "completed"
+		uuid_cache.Set(idempotencyKey)
+		c.IndentedJSON(http.StatusOK, res)
+
+		// print("wtf...")
+		// c.Status(http.StatusInternalServerError)
+		// c.Error(idempotencyErr)
 	})
 
 	

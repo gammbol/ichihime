@@ -135,6 +135,24 @@ func (f *fakeUUIDCache) Set(id storage.Idempotency) error {
 	return nil
 }
 
+func (f *fakeUUIDCache) SetNx(id storage.Idempotency) (bool, error) {
+	f.mu.Lock()
+	defer f.mu.Unlock()
+
+	f.setCalls++
+	if f.setErr != nil {
+		return false, f.setErr
+	}
+	
+	_, ok := f.statuses[id.Key]
+	if ok {
+		return false, nil
+	}
+
+	f.statuses[id.Key] = id.Status
+	return true, nil
+}
+
 func (f *fakeUUIDCache) status(key string) (string, bool) {
 	f.mu.Lock()
 	defer f.mu.Unlock()
