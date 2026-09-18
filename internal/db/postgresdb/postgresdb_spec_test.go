@@ -6,6 +6,7 @@ import (
 	"context"
 	"testing"
 
+	"github.com/gammbol/ichihime/internal/storage"
 	"github.com/shopspring/decimal"
 )
 
@@ -14,7 +15,11 @@ func TestSpecTransferRejectsSameAccount(t *testing.T) {
 
 	account := mustInsertAccount(t, p, decimal.RequireFromString("100.00"))
 
-	_, err := p.Transfer(int(account), int(account), decimal.RequireFromString("10.00"))
+	_, err := p.Transfer(storage.TransferForm{
+		Source:      int(account),
+		Destination: int(account),
+		Amount:      decimal.RequireFromString("10.00"),
+	})
 	if err == nil {
 		t.Fatal("same-account transfer must be rejected")
 	}
@@ -41,7 +46,11 @@ func TestSpecTransferRejectsInsufficientFunds(t *testing.T) {
 	source := mustInsertAccount(t, p, decimal.RequireFromString("5.00"))
 	dest := mustInsertAccount(t, p, decimal.Zero)
 
-	_, err := p.Transfer(int(source), int(dest), decimal.RequireFromString("10.00"))
+	_, err := p.Transfer(storage.TransferForm{
+		Source:      int(source),
+		Destination: int(dest),
+		Amount:      decimal.RequireFromString("10.00"),
+	})
 	if err == nil {
 		t.Fatal("transfer larger than source balance must be rejected")
 	}

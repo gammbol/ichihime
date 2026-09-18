@@ -6,6 +6,7 @@ import (
 	"net/http/httptest"
 	"net/url"
 	"strings"
+	"sync"
 	"testing"
 
 	"github.com/gammbol/ichihime/internal/router"
@@ -15,6 +16,8 @@ import (
 )
 
 type fakeDB struct {
+	mu sync.Mutex
+
 	accounts     []storage.Account
 	accountsErr  error
 	account      storage.Account
@@ -47,14 +50,109 @@ func (f *fakeDB) GetTransferById(int) (storage.Transfer, error) {
 }
 
 func (f *fakeDB) Transfer(form storage.TransferForm) (storage.Transfer, error) {
+	f.mu.Lock()
+	defer f.mu.Unlock()
+
 	f.transferCalls++
 	f.gotForm = form
 	return f.transfer, f.transferErr
 }
 
+func (f *fakeDB) transferCallCount() int {
+	f.mu.Lock()
+	defer f.mu.Unlock()
+	return f.transferCalls
+}
+
+func (f *fakeDB) lastTransferForm() storage.TransferForm {
+	f.mu.Lock()
+	defer f.mu.Unlock()
+	return f.gotForm
+}
+
+var errFakeCacheMiss = errors.New("idempotency key not found")
+
+type fakeUUIDCache struct {
+	mu sync.Mutex
+
+	statuses map[string]string
+	getErr   error
+	setErr   error
+
+	getCalls int
+	setCalls int
+
+	// beforeGetReturn is used by concurrency tests to force several callers
+	// to observe the same cache state before any of them can call Set.
+	beforeGetReturn func()
+}
+
+func newFakeUUIDCache() *fakeUUIDCache {
+	return &fakeUUIDCache{statuses: make(map[string]string)}
+}
+
+func (f *fakeUUIDCache) Close() {}
+
+func (f *fakeUUIDCache) Get(id *storage.Idempotency) error {
+	f.mu.Lock()
+	f.getCalls++
+	getErr := f.getErr
+	status, ok := f.statuses[id.Key]
+	beforeReturn := f.beforeGetReturn
+	f.mu.Unlock()
+
+	if beforeReturn != nil {
+		beforeReturn()
+	}
+	if getErr != nil {
+		return getErr
+	}
+	if !ok {
+		return errFakeCacheMiss
+	}
+
+	id.Status = status
+	return nil
+}
+
+func (f *fakeUUIDCache) Set(id storage.Idempotency) error {
+	f.mu.Lock()
+	defer f.mu.Unlock()
+
+	f.setCalls++
+	if f.setErr != nil {
+		return f.setErr
+	}
+	f.statuses[id.Key] = id.Status
+	return nil
+}
+
+func (f *fakeUUIDCache) status(key string) (string, bool) {
+	f.mu.Lock()
+	defer f.mu.Unlock()
+	status, ok := f.statuses[key]
+	return status, ok
+}
+
+func (f *fakeUUIDCache) setStatus(key, status string) {
+	f.mu.Lock()
+	defer f.mu.Unlock()
+	f.statuses[key] = status
+}
+
+func (f *fakeUUIDCache) setCallCount() int {
+	f.mu.Lock()
+	defer f.mu.Unlock()
+	return f.setCalls
+}
+
 func newHTTPTestApp(db *fakeDB) *Application {
+	return newHTTPTestAppWithCache(db, newFakeUUIDCache())
+}
+
+func newHTTPTestAppWithCache(db *fakeDB, cache *fakeUUIDCache) *Application {
 	gin.SetMode(gin.TestMode)
-	return NewApplication(db, router.New(":0"))
+	return NewApplication(db, cache, router.New(":0"))
 }
 
 func TestAccountsRoute(t *testing.T) {
@@ -126,16 +224,18 @@ func TestPayRouteHappyPath(t *testing.T) {
 	rec := httptest.NewRecorder()
 	req := httptest.NewRequest(http.MethodPost, "/pay", strings.NewReader(form.Encode()))
 	req.Header.Set("Content-Type", "application/x-www-form-urlencoded")
+	req.Header.Set("Idempotency-Key", "happy-path-key")
 	app.routerApp.Router.ServeHTTP(rec, req)
 
 	if rec.Code != http.StatusOK {
 		t.Fatalf("status=%d, want 200; body=%s", rec.Code, rec.Body.String())
 	}
-	if db.transferCalls != 1 {
-		t.Fatalf("Transfer called %d times, want 1", db.transferCalls)
+	if db.transferCallCount() != 1 {
+		t.Fatalf("Transfer called %d times, want 1", db.transferCallCount())
 	}
-	if db.gotForm.Source != 1 || db.gotForm.Destination != 2 || !db.gotForm.Amount.Equal(decimal.RequireFromString("12.34")) {
-		t.Fatalf("Transfer called with form=%+v; want source=1 destination=2 amount=12.34", db.gotForm)
+	gotForm := db.lastTransferForm()
+	if gotForm.Source != 1 || gotForm.Destination != 2 || !gotForm.Amount.Equal(decimal.RequireFromString("12.34")) {
+		t.Fatalf("Transfer called with form=%+v; want source=1 destination=2 amount=12.34", gotForm)
 	}
 	if !strings.Contains(rec.Body.String(), `"status": "completed"`) {
 		t.Fatalf("response does not contain completed transfer: %s", rec.Body.String())
@@ -178,8 +278,8 @@ func TestPayRouteRejectsMalformedInputBeforeDB(t *testing.T) {
 			if rec.Code != http.StatusBadRequest {
 				t.Fatalf("status=%d, want 400; body=%s", rec.Code, rec.Body.String())
 			}
-			if db.transferCalls != 0 {
-				t.Fatalf("malformed HTTP input reached DB.Transfer %d time(s); want 0", db.transferCalls)
+			if db.transferCallCount() != 0 {
+				t.Fatalf("malformed HTTP input reached DB.Transfer %d time(s); want 0", db.transferCallCount())
 			}
 		})
 	}

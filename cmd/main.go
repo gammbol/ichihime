@@ -17,6 +17,7 @@ import (
 	"github.com/gammbol/ichihime/internal/storage"
 	uuidcache "github.com/gammbol/ichihime/internal/uuid_cache"
 	rediscache "github.com/gammbol/ichihime/internal/uuid_cache/redis"
+	"github.com/redis/go-redis/v9"
 
 	"github.com/gin-gonic/gin"
 	"github.com/joho/godotenv"
@@ -134,7 +135,29 @@ func NewApplication(db db.DBContract, uuid_cache uuidcache.UUIDCacheContract, rA
 		}
 
 		idempotencyErr := uuid_cache.Get(&idempotencyKey)
-		if idempotencyErr != nil {
+		if idempotencyErr == nil {
+			switch idempotencyKey.Status {
+			case "pending":
+				c.Status(http.StatusConflict)
+				c.Error(errors.New("Your request is already in process!"))
+				return 
+			case "completed":
+				c.Status(http.StatusConflict)
+				c.Error(errors.New("Your request is already processed!"))
+				return
+			case "failed":
+				c.Status(http.StatusBadRequest)
+				c.Error(errors.New("Your request has been failed! Please try again!"))
+				return
+
+			default:
+				c.Status(http.StatusInternalServerError)
+				c.Error(errors.New("Oops... Something went wrong!"))
+				return
+			}
+		}
+
+		if idempotencyErr != redis.Nil {
 			idempotencyKey.Status = "pending"
 
 			idempotencyErr := uuid_cache.Set(idempotencyKey)
@@ -146,35 +169,25 @@ func NewApplication(db db.DBContract, uuid_cache uuidcache.UUIDCacheContract, rA
 
 			res, transferErr := app.db.Transfer(transferForm)
 			if transferErr != nil {
+				idempotencyKey.Status = "failed"
+				uuid_cache.Set(idempotencyKey)
 				c.Status(http.StatusInternalServerError)
 				c.Error(transferErr)
 				return
 			}
 
+			idempotencyKey.Status = "completed"
+			uuid_cache.Set(idempotencyKey)
 			c.IndentedJSON(http.StatusOK, res)
 			return
 		}
 
-		switch idempotencyKey.Status {
-		case "pending":
-			c.Status(http.StatusConflict)
-			c.Error(errors.New("Your request is already in process!"))
-			return 
-		case "completed":
-			c.Status(http.StatusConflict)
-			c.Error(errors.New("Your request is already processed!"))
-			return
-		case "failed":
-			c.Status(http.StatusBadRequest)
-			c.Error(errors.New("Your request has been failed! Please try again!"))
-			return
-
-		default:
-			c.Status(http.StatusInternalServerError)
-			c.Error(errors.New("Oops... Something went wrong!"))
-			return
-		}
+		print("wtf...")
+		c.Status(http.StatusInternalServerError)
+		c.Error(idempotencyErr)
 	})
+
+	
 
 	return &app
 }

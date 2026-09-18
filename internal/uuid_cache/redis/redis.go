@@ -30,12 +30,8 @@ func (this *Redis) Close() {
 
 func (this *Redis) Get(id *storage.Idempotency) error {
 	val, err := this.client.Get(context.Background(), id.Key).Result()
-	if err != nil {
-		return err
-	}
-
 	id.Status = val
-	return nil
+	return err
 }
 
 func (this *Redis) Set(id storage.Idempotency) error {
