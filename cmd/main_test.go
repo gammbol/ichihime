@@ -12,6 +12,7 @@ import (
 	"github.com/gammbol/ichihime/internal/router"
 	"github.com/gammbol/ichihime/internal/storage"
 	"github.com/gin-gonic/gin"
+	"github.com/redis/go-redis/v9"
 	"github.com/shopspring/decimal"
 )
 
@@ -29,6 +30,9 @@ type fakeDB struct {
 
 	gotForm       storage.TransferForm
 	transferCalls int
+
+	// Configure before starting requests; invoked outside mu so hooks can inspect the DB/cache.
+	beforeTransfer func(storage.TransferForm)
 }
 
 func (f *fakeDB) Close() {}
@@ -51,11 +55,15 @@ func (f *fakeDB) GetTransferById(int) (storage.Transfer, error) {
 
 func (f *fakeDB) Transfer(form storage.TransferForm) (storage.Transfer, error) {
 	f.mu.Lock()
-	defer f.mu.Unlock()
-
 	f.transferCalls++
 	f.gotForm = form
-	return f.transfer, f.transferErr
+	hook, result, err := f.beforeTransfer, f.transfer, f.transferErr
+	f.mu.Unlock()
+
+	if hook != nil {
+		hook(form)
+	}
+	return result, err
 }
 
 func (f *fakeDB) transferCallCount() int {
@@ -69,8 +77,6 @@ func (f *fakeDB) lastTransferForm() storage.TransferForm {
 	defer f.mu.Unlock()
 	return f.gotForm
 }
-
-var errFakeCacheMiss = errors.New("idempotency key not found")
 
 type fakeUUIDCache struct {
 	mu sync.Mutex
@@ -104,14 +110,16 @@ func (f *fakeUUIDCache) Get(id *storage.Idempotency) error {
 	if beforeReturn != nil {
 		beforeReturn()
 	}
+	id.Status = status
 	if getErr != nil {
+		id.Status = ""
 		return getErr
 	}
 	if !ok {
-		return errFakeCacheMiss
+		// Match Redis.Get: the handler distinguishes a cache miss from an outage.
+		return redis.Nil
 	}
 
-	id.Status = status
 	return nil
 }
 
@@ -144,6 +152,12 @@ func (f *fakeUUIDCache) setCallCount() int {
 	f.mu.Lock()
 	defer f.mu.Unlock()
 	return f.setCalls
+}
+
+func (f *fakeUUIDCache) getCallCount() int {
+	f.mu.Lock()
+	defer f.mu.Unlock()
+	return f.getCalls
 }
 
 func newHTTPTestApp(db *fakeDB) *Application {
@@ -273,6 +287,7 @@ func TestPayRouteRejectsMalformedInputBeforeDB(t *testing.T) {
 			rec := httptest.NewRecorder()
 			req := httptest.NewRequest(http.MethodPost, "/pay", strings.NewReader(tt.form.Encode()))
 			req.Header.Set("Content-Type", "application/x-www-form-urlencoded")
+			req.Header.Set("Idempotency-Key", "malformed-input-key")
 			app.routerApp.Router.ServeHTTP(rec, req)
 
 			if rec.Code != http.StatusBadRequest {

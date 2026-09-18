@@ -40,6 +40,7 @@ func TestSpecPayRouteRejectsMalformedInputWith400(t *testing.T) {
 			rec := httptest.NewRecorder()
 			req := httptest.NewRequest(http.MethodPost, "/pay", strings.NewReader(tt.form.Encode()))
 			req.Header.Set("Content-Type", "application/x-www-form-urlencoded")
+			req.Header.Set("Idempotency-Key", "malformed-input-key")
 			app.routerApp.Router.ServeHTTP(rec, req)
 
 			if rec.Code != http.StatusBadRequest {

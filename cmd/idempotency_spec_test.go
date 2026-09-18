@@ -3,69 +3,14 @@
 package main
 
 import (
-	"errors"
 	"net/http"
 	"sync"
-	"sync/atomic"
 	"testing"
+	"time"
 )
 
-// These tests describe the guarantees the idempotency layer must eventually
-// provide. They intentionally expose gaps in the current Redis GET -> SET flow.
-
-func TestSpecPayRouteMarksKeyCompletedAfterSuccess(t *testing.T) {
-	db := &fakeDB{transfer: completedFakeTransfer()}
-	cache := newFakeUUIDCache()
-	app := newHTTPTestAppWithCache(db, cache)
-
-	rec := performPayRequest(app, validPayForm(), "successful-key")
-
-	if rec.Code != http.StatusOK {
-		t.Fatalf("status=%d, want 200; body=%s", rec.Code, rec.Body.String())
-	}
-	status, ok := cache.status("successful-key")
-	if !ok {
-		t.Fatal("successful idempotency key was not stored")
-	}
-	if status != "completed" {
-		t.Fatalf("successful key status=%q, want completed", status)
-	}
-}
-
-func TestSpecPayRouteMarksKeyFailedAfterTransferFailure(t *testing.T) {
-	db := &fakeDB{transferErr: errors.New("transfer failed")}
-	cache := newFakeUUIDCache()
-	app := newHTTPTestAppWithCache(db, cache)
-
-	rec := performPayRequest(app, validPayForm(), "failed-key")
-
-	if rec.Code != http.StatusInternalServerError {
-		t.Fatalf("status=%d, want 500; body=%s", rec.Code, rec.Body.String())
-	}
-	status, ok := cache.status("failed-key")
-	if !ok {
-		t.Fatal("failed idempotency key was not stored")
-	}
-	if status != "failed" {
-		t.Fatalf("failed key status=%q, want failed", status)
-	}
-}
-
-func TestSpecPayRouteDoesNotTreatCacheOutageAsMissingKey(t *testing.T) {
-	db := &fakeDB{transfer: completedFakeTransfer()}
-	cache := newFakeUUIDCache()
-	cache.getErr = errors.New("cache unavailable")
-	app := newHTTPTestAppWithCache(db, cache)
-
-	rec := performPayRequest(app, validPayForm(), "outage-key")
-
-	if rec.Code != http.StatusInternalServerError {
-		t.Fatalf("status=%d, want 500; body=%s", rec.Code, rec.Body.String())
-	}
-	if db.transferCallCount() != 0 {
-		t.Fatalf("cache outage reached DB.Transfer %d time(s); want 0", db.transferCallCount())
-	}
-}
+// Lifecycle and cache error regressions now run in the default suite.
+// This specification still exposes the non-atomic Redis GET -> SET flow.
 
 func TestSpecPayRouteConcurrentSameKeyTransfersOnlyOnce(t *testing.T) {
 	const requests = 32
@@ -77,6 +22,9 @@ func TestSpecPayRouteConcurrentSameKeyTransfersOnlyOnce(t *testing.T) {
 	var allGets sync.WaitGroup
 	allGets.Add(requests)
 	releaseGets := make(chan struct{})
+	var releaseOnce sync.Once
+	release := func() { releaseOnce.Do(func() { close(releaseGets) }) }
+	defer release()
 	cache.beforeGetReturn = func() {
 		allGets.Done()
 		<-releaseGets
@@ -93,15 +41,26 @@ func TestSpecPayRouteConcurrentSameKeyTransfersOnlyOnce(t *testing.T) {
 		}()
 	}
 
-	allGets.Wait()
-	close(releaseGets)
+	allGetsDone := make(chan struct{})
+	go func() {
+		allGets.Wait()
+		close(allGetsDone)
+	}()
+	select {
+	case <-allGetsDone:
+	case <-time.After(10 * time.Second):
+		release()
+		wg.Wait()
+		t.Fatal("requests did not all reach cache lookup within 10s")
+	}
+	release()
 	wg.Wait()
 	close(statuses)
 
-	var successful atomic.Int64
+	successful := 0
 	for status := range statuses {
 		if status == http.StatusOK {
-			successful.Add(1)
+			successful++
 		}
 	}
 
@@ -109,7 +68,7 @@ func TestSpecPayRouteConcurrentSameKeyTransfersOnlyOnce(t *testing.T) {
 		t.Fatalf("%d simultaneous requests with one key called DB.Transfer %d times, want exactly 1",
 			requests, db.transferCallCount())
 	}
-	if successful.Load() != 1 {
-		t.Fatalf("successful HTTP responses=%d, want exactly 1", successful.Load())
+	if successful != 1 {
+		t.Fatalf("successful HTTP responses=%d, want exactly 1", successful)
 	}
 }

@@ -157,7 +157,7 @@ func NewApplication(db db.DBContract, uuid_cache uuidcache.UUIDCacheContract, rA
 			}
 		}
 
-		if idempotencyErr != redis.Nil {
+		if idempotencyErr == redis.Nil {
 			idempotencyKey.Status = "pending"
 
 			idempotencyErr := uuid_cache.Set(idempotencyKey)
